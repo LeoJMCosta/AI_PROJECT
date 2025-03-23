@@ -16,9 +16,8 @@ def clean_text(text):
     text = re.sub(r'P[áa]g\.\s*\d+\s*de\s*\d+', '', text, flags=re.IGNORECASE)
 
     # 5. Remove linhas com informações de versão e rodapé
-    # Remove qualquer linha que contenha "Versão à data de" seguido de "Pág." (agora unificado)
-    text = re.sub(r'^.*Versão à data de.*Pág\..*$', '',
-                  text, flags=re.IGNORECASE | re.MULTILINE)
+    text = re.sub(r'^.*Versão à data de.*$', '', text,
+                  flags=re.IGNORECASE | re.MULTILINE)
 
     # 6. Remove cabeçalhos/rodapés fixos conhecidos
     text = re.sub(r'CÓDIGO DO TRABALHO\s*-\s*CT',
@@ -27,5 +26,8 @@ def clean_text(text):
 
     # 7. Normaliza espaços em branco
     text = re.sub(r'\s+', ' ', text).strip()
+
+    # 8. Mantém quebra de linha após título do artigo
+    text = re.sub(r'(Artigo\s+\d+[.ºA-Z\-]*)\s+', r'\1\n', text)
 
     return text
