@@ -1,6 +1,5 @@
 import os
 import re
-import chromadb.api.client
 import gradio
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -10,12 +9,10 @@ from langchain_chroma import Chroma
 import chromadb.api
 from utils.pdf_cleaner import clean_text
 from dotenv import load_dotenv
+
 load_dotenv()
 
 openai_api_key = os.getenv("OPENAI_API_KEY")
-
-if not openai_api_key:
-    raise ValueError("OPENAI_API_KEY não encontrada! Verifica o teu .env.")
 
 vector_db = None
 embeddings_model = OpenAIEmbeddings(
@@ -23,30 +20,29 @@ embeddings_model = OpenAIEmbeddings(
     openai_api_key=openai_api_key
 )
 
+# def split_by_article(documents):
+#     full_text = " ".join([doc.page_content for doc in documents])
+#     metadata = documents[0].metadata if documents else {}
 
-def split_by_article(documents):
-    full_text = " ".join([doc.page_content for doc in documents])
-    metadata = documents[0].metadata if documents else {}
+#     pattern = re.compile(r'(Artigo\s+\d+[.ºA-Z\-]*)')
+#     matches = list(pattern.finditer(full_text))
 
-    pattern = re.compile(r'(Artigo\s+\d+[.ºA-Z\-]*)')
-    matches = list(pattern.finditer(full_text))
+#     article_chunks = []
+#     for i, match in enumerate(matches):
+#         start = match.start()
+#         end = matches[i + 1].start() if i + \
+#             1 < len(matches) else len(full_text)
+#         chunk_text = full_text[start:end].strip()
+#         article_chunks.append(
+#             Document(page_content=chunk_text, metadata=metadata))
 
-    article_chunks = []
-    for i, match in enumerate(matches):
-        start = match.start()
-        end = matches[i + 1].start() if i + \
-            1 < len(matches) else len(full_text)
-        chunk_text = full_text[start:end].strip()
-        article_chunks.append(
-            Document(page_content=chunk_text, metadata=metadata))
-
-    return article_chunks
+#     return article_chunks
 
 
 def load_information():
     # Phase 1 - Rag Preparation
     # Step 1 - Document Loading
-    file_path = "../docs/codigo_trabalho.pdf"
+    file_path = "../docs/bitcoin.pdf"
 
     loader = PyPDFLoader(file_path)
     docs = loader.load()
@@ -55,7 +51,15 @@ def load_information():
     for doc in docs:
         doc.page_content = clean_text(doc.page_content)
 
-    chunks = split_by_article(docs)
+    chunksize = 1250
+    # Entre 15% e 30% valores default (NÃO OBRIGATÓRIOS)
+    chunkoverlap = chunksize * 0.2
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunksize,
+        chunk_overlap=chunkoverlap
+    )
+
+    chunks = text_splitter.split_documents(docs)
 
     chunks_as_string = [chunk.page_content for chunk in chunks]
     vectors = embeddings_model.embed_documents(chunks_as_string)
@@ -66,22 +70,21 @@ def load_information():
         # Mesma coleção TEM que ter o mesmo embedding model - embedding model de diferente tamanho dá erro
         # Mas embedding model com o mesmo tamanho não dá erro (ter atenção aqui)
         embedding_function=embeddings_model,
-        persist_directory="./db_v2",
+        persist_directory="./db_v3",
     )
 
     vector_db.add_documents(chunks)
 
 
 def generation_phase(message, history):
-
     vector_db = Chroma(
         collection_name="legal-documents",
         # Mesma coleção TEM que ter o mesmo embedding model - embedding model de diferente tamanho dá erro
         # Mas embedding model com o mesmo tamanho não dá erro (ter atenção aqui)
         embedding_function=embeddings_model,
-        persist_directory="./db_v2",
+        persist_directory="./db_v3",
     )
-    relevant_chunks = vector_db.similarity_search(message, k=1)
+    relevant_chunks = vector_db.similarity_search(message, k=3)
 
     print("relevant_chunks:")
     for chunk in relevant_chunks:
@@ -94,8 +97,8 @@ def generation_phase(message, history):
 
     prompt = f"""
         Instructions
-        Answer ther user query based on the provided context, or use the provided context and logically answer the user question.
-        Don't asnwer questions that are not present on the provided context or you can't logically answer it from the context.
+        Answer the user query based on the provided context, or use the provided context and logically answer the user question.
+        Don't answer questions that are not present on the provided context or you can't logically answer it from the context.
         If the question is not on the provided context, answer with 'Não tenho informação suficiente para responder a isso.'.
 
         The source on the metadata is about the file name, use it on your answer to say what file did you used.
