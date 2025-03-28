@@ -20,99 +20,143 @@ embeddings_model = OpenAIEmbeddings(
     openai_api_key=openai_api_key
 )
 
-# def split_by_article(documents):
-#     full_text = " ".join([doc.page_content for doc in documents])
-#     metadata = documents[0].metadata if documents else {}
 
-#     pattern = re.compile(r'(Artigo\s+\d+[.ºA-Z\-]*)')
-#     matches = list(pattern.finditer(full_text))
+def split_by_article(documents):
+    full_text = " ".join([doc.page_content for doc in documents])
+    metadata = documents[0].metadata if documents else {}
 
-#     article_chunks = []
-#     for i, match in enumerate(matches):
-#         start = match.start()
-#         end = matches[i + 1].start() if i + \
-#             1 < len(matches) else len(full_text)
-#         chunk_text = full_text[start:end].strip()
-#         article_chunks.append(
-#             Document(page_content=chunk_text, metadata=metadata))
+    pattern = re.compile(
+        r'(Artigo\s+(\d+[.ºA-Z\-]*))\s+(.*?)(?=Artigo\s+\d+[.ºA-Z\-]*|\Z)', re.DOTALL)
+    article_chunks = []
 
-#     return article_chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=800,
+        chunk_overlap=100
+    )
+
+    for match in pattern.finditer(full_text):
+        full_title = match.group(1).strip()
+        number_only = match.group(2).strip()
+        body = match.group(3).strip()
+        content = f"{full_title}\n{body}"
+
+        chunk_metadata = {
+            **metadata,
+            "article_number": number_only,
+            "article_title": full_title
+        }
+
+        subchunks = splitter.split_text(content)
+        for sub in subchunks:
+            article_chunks.append(
+                Document(page_content=sub, metadata=chunk_metadata)
+            )
+
+    return article_chunks
 
 
 def load_information():
-    # Phase 1 - Rag Preparation
-    # Step 1 - Document Loading
-    file_path = "../docs/bitcoin.pdf"
+    file_path = "../docs/codigo_trabalho.pdf"
 
     loader = PyPDFLoader(file_path)
     docs = loader.load()
 
-    # Step 1.5 - Document cleaning
     for doc in docs:
         doc.page_content = clean_text(doc.page_content)
 
-    chunksize = 1250
-    # Entre 15% e 30% valores default (NÃO OBRIGATÓRIOS)
-    chunkoverlap = chunksize * 0.2
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunksize,
-        chunk_overlap=chunkoverlap
-    )
+    # Tenta dividir por artigos primeiro
+    article_chunks = split_by_article(docs)
 
-    chunks = text_splitter.split_documents(docs)
-
-    chunks_as_string = [chunk.page_content for chunk in chunks]
-    vectors = embeddings_model.embed_documents(chunks_as_string)
+    # Fallback: Se a divisão por artigos falhar ou retornar poucos chunks, usa split padrão
+    if not article_chunks or len(article_chunks) < 10:
+        print("Fallback: usando RecursiveCharacterTextSplitter.")
+        chunksize = 1250
+        chunkoverlap = chunksize * 0.2
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunksize,
+            chunk_overlap=chunkoverlap
+        )
+        chunks = text_splitter.split_documents(docs)
+    else:
+        chunks = article_chunks
 
     chromadb.api.client.SharedSystemClient.clear_system_cache()
     vector_db = Chroma(
         collection_name="legal-documents",
-        # Mesma coleção TEM que ter o mesmo embedding model - embedding model de diferente tamanho dá erro
-        # Mas embedding model com o mesmo tamanho não dá erro (ter atenção aqui)
         embedding_function=embeddings_model,
         persist_directory="./db_v3",
     )
-
     vector_db.add_documents(chunks)
 
 
 def generation_phase(message, history):
     vector_db = Chroma(
         collection_name="legal-documents",
-        # Mesma coleção TEM que ter o mesmo embedding model - embedding model de diferente tamanho dá erro
-        # Mas embedding model com o mesmo tamanho não dá erro (ter atenção aqui)
         embedding_function=embeddings_model,
         persist_directory="./db_v3",
     )
-    relevant_chunks = vector_db.similarity_search(message, k=3)
+
+    artigo_match = re.search(
+        r'artigo(?:\s+n[.ºº°]?\s*|\s+)?(\d+[.º°A-Z\-]*)', message, re.IGNORECASE)
+
+    matched_chunks = []
+
+    if artigo_match:
+        numero_artigo = artigo_match.group(1).strip()
+        numero_artigo = numero_artigo.replace(
+            "º", "").replace("°", "").replace(".", "").lower()
+
+        print(
+            f"🔎 A tentar encontrar diretamente o artigo {numero_artigo} nos metadados...")
+
+        all_docs = vector_db.get()
+        for i, content in enumerate(all_docs["documents"]):
+            metadata = all_docs["metadatas"][i]
+            artigo_meta = metadata.get("article_number", "").strip()
+            artigo_meta = artigo_meta.replace("º", "").replace(
+                "°", "").replace(".", "").lower()
+
+            if artigo_meta == numero_artigo:
+                matched_chunks.append(
+                    Document(page_content=content, metadata=metadata)
+                )
+
+    if not matched_chunks:
+        query = f"De acordo com o Código do Trabalho português, {message}"
+        matched_chunks = vector_db.similarity_search(query, k=4)
 
     print("relevant_chunks:")
-    for chunk in relevant_chunks:
-        print(chunk)
+    for chunk in matched_chunks:
+        print(chunk.metadata)
 
-    context_str = "\n\n".join(
-        [chunk.page_content for chunk in relevant_chunks])
+    context_str = "\n\n".join([chunk.page_content for chunk in matched_chunks])
 
-  # Step 2.2 Criar a nossa PROMPT final
+    cited_articles = list({
+        chunk.metadata.get("article_title")
+        for chunk in matched_chunks
+        if chunk.metadata.get("article_title")
+    })
+
+    artigo_info = (
+        f"Baseado nos seguintes artigos: {', '.join(cited_articles)}.\n\n"
+        if cited_articles else ""
+    )
 
     prompt = f"""
-        Instructions
-        Answer the user query based on the provided context, or use the provided context and logically answer the user question.
-        Don't answer questions that are not present on the provided context or you can't logically answer it from the context.
-        If the question is not on the provided context, answer with 'Não tenho informação suficiente para responder a isso.'.
+    Instruções:
+    Responde à pergunta do utilizador com base no contexto abaixo.
+    Se a resposta não estiver no contexto, responde apenas com: 'Não tenho informação suficiente para responder a isso.'.
 
-        The source on the metadata is about the file name, use it on your answer to say what file did you used.
+    Quando a resposta estiver no contexto, refere os artigos usados com base no título (ex: Artigo 114.º), se estiverem disponíveis.
 
-        User Query
-        {message}
-        End of User Query
+    Pergunta:
+    {message}
 
-        Context
-        {context_str}
-        End of Context
+    {artigo_info}
+
+    Contexto:
+    {context_str}
     """
-
-    # Step 2.3 - Chamar a llm da OpenAI
 
     llm = ChatOpenAI(
         model="gpt-4o-mini",
@@ -120,9 +164,6 @@ def generation_phase(message, history):
     )
 
     response = llm.invoke(prompt)
-
-    print("response")
-
     return response.content
 
 
