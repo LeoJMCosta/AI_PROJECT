@@ -142,20 +142,35 @@ def generation_phase(message, history):
         if cited_articles else ""
     )
 
+    formatted_history = "\n".join(
+        f"Pergunta do utilizador: {turn[0]}\nResposta do assistente: {turn[1]}"
+        for turn in history if len(turn) == 2
+    )
+
+    print("Histórico recebido:")
+    print(history)
+
     prompt = f"""
     Instruções:
-    Responde à pergunta do utilizador com base no contexto abaixo.
-    Se a resposta não estiver no contexto, responde apenas com: 'Não tenho informação suficiente para responder a isso.'.
+    Responde à pergunta do utilizador com base no contexto e/ou no histórico abaixo.
+    Usa tanto o contexto como o histórico da conversa para responder ao utilizador.
+    Se a resposta não estiver no contexto e/ou no histórico, responde apenas com: 'Não tenho informação suficiente para responder a isso.'.
 
-    Quando a resposta estiver no contexto, refere os artigos usados com base no título (ex: Artigo 114.º), se estiverem disponíveis.
+    Quando a resposta estiver no contexto e/ou no histórico, refere os artigos usados com base no título (ex: Artigo 114.º), se estiverem disponíveis.
 
     Pergunta:
     {message}
+    Fim da pergunta
 
     {artigo_info}
 
     Contexto:
     {context_str}
+    Fim do contexto
+    
+    Histórico:
+    {formatted_history}
+    Final do histórico.
     """
 
     llm = ChatOpenAI(
