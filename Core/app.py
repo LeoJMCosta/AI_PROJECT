@@ -11,10 +11,8 @@ from utils.pdf_cleaner import clean_text
 from dotenv import load_dotenv
 
 load_dotenv()
-
 openai_api_key = os.getenv("OPENAI_API_KEY")
 
-vector_db = None
 embeddings_model = OpenAIEmbeddings(
     model="text-embedding-3-large",
     openai_api_key=openai_api_key
@@ -30,8 +28,8 @@ def split_by_article(documents):
     article_chunks = []
 
     splitter = RecursiveCharacterTextSplitter(
-        chunk_size=800,
-        chunk_overlap=100
+        chunk_size=1250,
+        chunk_overlap=250,
     )
 
     for match in pattern.finditer(full_text):
@@ -55,7 +53,7 @@ def split_by_article(documents):
     return article_chunks
 
 
-def load_information():
+def ingestion_phase():
     file_path = "../docs/codigo_trabalho.pdf"
 
     loader = PyPDFLoader(file_path)
@@ -64,11 +62,10 @@ def load_information():
     for doc in docs:
         doc.page_content = clean_text(doc.page_content)
 
-    # Tenta dividir por artigos primeiro
     article_chunks = split_by_article(docs)
 
     # Fallback: Se a divisão por artigos falhar ou retornar poucos chunks, usa split padrão
-    if not article_chunks or len(article_chunks) < 10:
+    if not article_chunks or len(article_chunks) < 5:
         print("Fallback: usando RecursiveCharacterTextSplitter.")
         chunksize = 1250
         chunkoverlap = chunksize * 0.2
@@ -89,15 +86,42 @@ def load_information():
     vector_db.add_documents(chunks)
 
 
-def generation_phase(message, history):
+def resolve_coreference(message, history):
+    # Remove pontuação e espaços extras
+    cleaned = message.strip().lower()
+
+    # Caso especial: apenas um número ou algo como "e o 137"
+    num_only_match = re.match(r"^(e\s+o\s+)?(\d+[a-zA-Z\-]*)\??$", cleaned)
+    if num_only_match:
+        last_article_ref = None
+        for turn in reversed(history):
+            if not turn or not turn[0]:
+                continue
+            match = re.search(
+                r'artigo\s+(\d+[.º°A-Z\-]*)', turn[0], re.IGNORECASE)
+            if match:
+                last_article_ref = match.group(1)
+                break
+
+        numero = num_only_match.group(2)
+        print(
+            f"[coref] Detetado número isolado '{numero}' → reformulado como 'artigo {numero}'")
+        return f"artigo {numero}"
+
+    return message
+
+
+def retrieval_phase(message, history):
     vector_db = Chroma(
         collection_name="legal-documents",
         embedding_function=embeddings_model,
         persist_directory="./db_v3",
     )
 
+    message = resolve_coreference(message, history)
+
     artigo_match = re.search(
-        r'artigo(?:\s+n[.ºº°]?\s*|\s+)?(\d+[.º°A-Z\-]*)', message, re.IGNORECASE)
+        r'artigo(?:\s+n[.º°]?\s*|\s+)?(\d+[.º°A-Z\-]*)', message, re.IGNORECASE)
 
     matched_chunks = []
 
@@ -105,9 +129,6 @@ def generation_phase(message, history):
         numero_artigo = artigo_match.group(1).strip()
         numero_artigo = numero_artigo.replace(
             "º", "").replace("°", "").replace(".", "").lower()
-
-        print(
-            f"🔎 A tentar encontrar diretamente o artigo {numero_artigo} nos metadados...")
 
         all_docs = vector_db.get()
         for i, content in enumerate(all_docs["documents"]):
@@ -125,11 +146,16 @@ def generation_phase(message, history):
         query = f"De acordo com o Código do Trabalho português, {message}"
         matched_chunks = vector_db.similarity_search(query, k=4)
 
-    print("relevant_chunks:")
-    for chunk in matched_chunks:
-        print(chunk.metadata)
+    return matched_chunks
 
-    context_str = "\n\n".join([chunk.page_content for chunk in matched_chunks])
+
+def generation_phase(message, history):
+    matched_chunks = retrieval_phase(message, history)
+
+    context_str = "\n\n".join([
+        f"{chunk.metadata.get('article_title', '')}\n{chunk.page_content.strip()}"
+        for chunk in matched_chunks
+    ])
 
     cited_articles = list({
         chunk.metadata.get("article_title")
@@ -147,16 +173,16 @@ def generation_phase(message, history):
         for turn in history if len(turn) == 2
     )
 
-    print("Histórico recebido:")
-    print(history)
-
     prompt = f"""
     Instruções:
+    Se for algo conversacional, responde como um assistente de chat.
+    Tenta sempre responder em português europeu.
     Responde à pergunta do utilizador com base no contexto e/ou no histórico abaixo.
     Usa tanto o contexto como o histórico da conversa para responder ao utilizador.
     Se a resposta não estiver no contexto e/ou no histórico, responde apenas com: 'Não tenho informação suficiente para responder a isso.'.
 
     Quando a resposta estiver no contexto e/ou no histórico, refere os artigos usados com base no título (ex: Artigo 114.º), se estiverem disponíveis.
+    Não dês o número do artigo se não tiveres a certeza de que é o correto.
 
     Pergunta:
     {message}
@@ -182,5 +208,5 @@ def generation_phase(message, history):
     return response.content
 
 
-load_information()
+ingestion_phase()
 gradio.ChatInterface(generation_phase).launch(debug=True)
